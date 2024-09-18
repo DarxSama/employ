@@ -3,18 +3,12 @@ const mysql = require('mysql2')
 const app = express()
 const port = 4000
 
-const https = require('https');
-const fs = require('fs');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const SECRET_KEY = 'UX23Y24%@&2aMb';
+const crypto = require('crypto');
+const cors = require('cors');
 
-// Load SSL certificates
-const privateKey = fs.readFileSync('privatekey.pem', 'utf8');
-const certificate = fs.readFileSync('certificate.pem', 'utf8');
-const credentials = { key: privateKey, cert: certificate };
-
-//Database(MySql) configulation
 const db = mysql.createConnection(
     {
         host: "localhost",
@@ -24,69 +18,31 @@ const db = mysql.createConnection(
     }
 )
 db.connect()
-const cors = require('cors');
-//Middleware (Body parser)
 app.use(express.json())
 app.use(express.urlencoded ({extended: true}))
 app.use(cors());
 
-//Hello World API
-app.get('/', function(req, res){
-    res.send('Hello World!')
-});
-
-
-
-// Register
-app.post('/api/registerEm', 
-    function(req, res) {  
-        const { username, password, firstName, lastName } = req.body;
-        
-        //check existing username
-        let sql="SELECT * FROM employ WHERE username=?";
-        db.query(sql, [username], async function(err, results) {
-            if (err) throw err;
-            
-            if(results.length == 0) {
-                //password and salt are encrypted by hash function (bcrypt)
-                const salt = await bcrypt.genSalt(10); //generate salte
-                const password_hash = await bcrypt.hash(password, salt);        
-                                
-                //insert employ data into the database
-                sql = 'INSERT INTO employ (username, password, firstName, lastName ) VALUES (?, ?, ?, ? )';
-                db.query(sql, [username, password_hash, firstName, lastName ], (err, result) => {
-                    if (err) throw err;
-                
-                    res.send({'message':'ลงทะเบียนสำเร็จแล้ว','status':true});
-                });      
-            }else{
-                res.send({'message':'ชื่อผู้ใช้ซ้ำ','status':false});
-            }
-
-        });      
-    }
-);
-
-
-//Login
-app.post('/api/loginEm',
+/*############## EMPLOYEE ##############*/
+//Login (employee/admin)
+app.post('/api/admin/login',
     async function(req, res){
         //Validate username
         const {username, password} = req.body;                
-        let sql = "SELECT * FROM employ WHERE username=? AND isActive = 1";        
-        let employ = await query(sql, [username, username]);        
+        let sql = "SELECT * FROM employee WHERE username=? AND isActive = 1 AND positionID = 1";        
+        let employee = await query(sql, [username]);        
         
-        if(employ.length <= 0){            
+        if(employee.length <= 0){            
             return res.send( {'message':'ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง','status':false} );
         }else{            
-            employ = employ[0];
-            employID = employ['employID'];               
-            password_hash = employ['password'];       
+            employee = employee[0];
+            empID = employee['empID'];               
+            password_hash = employee['password'];       
+            positionID = employee['positionID']; 
         }
 
         //validate a number of attempts 
         let loginAttempt = 0;
-        sql = "SELECT loginAttempt FROM employ WHERE username=? AND isActive = 1 ";        
+        sql = "SELECT loginAttempt FROM employee WHERE username=? AND isActive = 1 ";        
         sql += "AND lastAttemptTime >= CURRENT_TIMESTAMP - INTERVAL 24 HOUR ";        
         
         row = await query(sql, [username, username]);    
@@ -98,7 +54,7 @@ app.post('/api/loginEm',
             }    
         }else{
             //reset login attempt                
-            sql = "UPDATE employ SET loginAttempt = 0, lastAttemptTime=NULL WHERE username=? AND isActive = 1";                    
+            sql = "UPDATE employee SET loginAttempt = 0, lastAttemptTime=NULL WHERE username=? AND isActive = 1";                    
             await query(sql, [username, username]);               
         }              
         
@@ -106,21 +62,22 @@ app.post('/api/loginEm',
         //validate password       
         if(bcrypt.compareSync(password, password_hash)){
             //reset login attempt                
-            sql = "UPDATE employ SET loginAttempt = 0, lastAttemptTime=NULL WHERE username=? AND isActive = 1";        
+            sql = "UPDATE employee SET loginAttempt = 0, lastAttemptTime=NULL WHERE username=? AND isActive = 1";        
             await query(sql, [username, username]);   
 
             //get token
-            const token = jwt.sign({ employID: employID, username: username }, SECRET_KEY, { expiresIn: '1h' });                
+            const token = jwt.sign({ empID: empID, username: username, positionID: positionID }, 
+                                    SECRET_KEY, { expiresIn: '1h' });                
 
-            employ['token'] = token;
-            employ['message'] = 'เข้าสู่ระบบสำเร็จ';
-            employ['status'] = true;
+            employee['token'] = token;
+            employee['message'] = 'เข้าสู่ระบบสำเร็จ';
+            employee['status'] = true;
 
-            res.send(employ);            
+            res.send(employee);            
         }else{
             //update login attempt
             const lastAttemptTime = new Date();
-            sql = "UPDATE employ SET loginAttempt = loginAttempt + 1, lastAttemptTime=? ";
+            sql = "UPDATE employee SET loginAttempt = loginAttempt + 1, lastAttemptTime=? ";
             sql += "WHERE username=? AND isActive = 1";                   
             await query(sql, [lastAttemptTime, username, username]);           
             
@@ -134,8 +91,105 @@ app.post('/api/loginEm',
     }
 );
 
+//Generate a password
+function generateRandomPassword(length) {
+    return crypto
+        .randomBytes(length)
+        .toString('base64')
+        .slice(0, length)
+        .replace(/\+/g, 'A')  // Replace '+' to avoid special chars if needed
+        .replace(/\//g, 'B'); // Replace '/' to avoid special chars if needed
+}
 
-// Function to execute a query with a promise-based approach
+//Add an employee
+app.post('/api/employee', 
+    async function(req, res){
+  
+        //Receive a token
+        const token = req.headers["authorization"].replace("Bearer ", "");        
+    
+        try{
+            // Validate the token    
+            let decode = jwt.verify(token, SECRET_KEY);               
+            if(decode.positionID != 1) {
+                return res.send( {'message':'คุณไม่ได้รับสิทธิ์ในการเข้าใช้งาน','status':false} );
+            }            
+
+            //receive data from users
+            const {username, firstName, lastName, email, gender } = req.body;
+
+            //check existing username
+            let sql="SELECT * FROM employee WHERE username=?";
+            db.query(sql, [username], async function(err, results) {
+                if (err) throw err;
+                
+                if(results.length == 0) {
+                    //password and salt are encrypted by hash function (bcrypt)
+                    const password = generateRandomPassword(8);
+                    const salt = await bcrypt.genSalt(10); //generate salte
+                    const password_hash = await bcrypt.hash(password, salt);    
+                    
+                    //save data into database                
+                    let sql = `INSERT INTO employee(
+                            username, password, firstName, lastName, email, gender, positionID
+                            )VALUES(?, ?, ?, ?, ?, ?, 0)`;   
+                    let params = [username, password_hash, firstName, lastName, email, gender];
+                
+                    db.query(sql, params, (err, result) => {
+                        if (err) throw err;
+                        res.send({ 'message': 'เพิ่มข้อมูลพนักงานเรียบร้อยแล้ว', 'status': true });
+                    });                    
+
+                }else{
+                    res.send({'message':'ชื่อผู้ใช้ซ้ำ','status':false});
+                }
+            });                        
+            
+        }catch(error){
+            res.send( {'message':'โทเคนไม่ถูกต้อง','status':false} );
+        }    
+    }
+);
+
+//Add an employee Admin
+app.post('/api/employee/admin', 
+    async function(req, res){
+      
+        try{
+
+            //receive data from users
+            const {username, password , firstName, lastName, email, gender } = req.body;
+
+            //check existing username
+            let sql="SELECT * FROM employee WHERE username=?";
+            db.query(sql, [username], async function(err, results) {
+                if (err) throw err;
+                
+                if(results.length == 0) {
+                    const password_hash = await bcrypt.hash(password, 10);    
+                    
+                    //save data into database                
+                    let sql = `INSERT INTO employee(
+                            username, password, firstName, lastName, email, gender, positionID
+                            )VALUES(?, ?, ?, ?, ?, ?, 1)`;   
+                    let params = [username, password_hash, firstName, lastName, email, gender];
+                
+                    db.query(sql, params, (err, result) => {
+                        if (err) throw err;
+                        res.send({ 'message': 'เพิ่มข้อมูลพนักงานเรียบร้อยแล้ว', 'status': true });
+                    });                    
+
+                }else{
+                    res.send({'message':'ชื่อผู้ใช้ซ้ำ','status':false});
+                }
+            });                        
+            
+        }catch(error){
+            res.send( {'message':'โทเคนไม่ถูกต้อง','status':false} );
+        }    
+    }
+);
+
 function query(sql, params) {
     return new Promise((resolve, reject) => {
       db.query(sql, params, (err, results) => {
@@ -148,37 +202,6 @@ function query(sql, params) {
     });
 }
 
-
-// Profile
-app.get('/api/profile/:id',
-    async function(req, res){
-        const employID = req.params.id;        
-        const token = req.headers["authorization"].replace("Bearer ", "");
-            
-        try{
-            let decode = jwt.verify(token, SECRET_KEY);               
-            if(employID != decode.employID) {
-              return res.send( {'message':'Id is not matched','status':false} );
-            }
-            
-            let sql = "SELECT * FROM employ WHERE employID = ? AND isActive = 1";        
-            let employ = await query(sql, [employID]);        
-            
-            employ = employ[0];
-            employ['message'] = 'success';
-            employ['status'] = true;
-            res.send(employ); 
-
-        }catch(error){
-            res.send( {'message':'Token is invalid','status':false} );
-        }
-        
-    }
-);
-
-
-// Create an HTTPS server
-const httpsServer = https.createServer(credentials, app);
-httpsServer.listen(port, () => {
+app.listen(port, () => {
     console.log(`HTTPS Server running on port ${port}`);
 });
